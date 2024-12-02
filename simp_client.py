@@ -1,5 +1,8 @@
 import socket
 import sys
+from threading import Thread
+import time
+from multiprocessing import Process
 
 def connect(host) -> str:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -10,18 +13,39 @@ def connect(host) -> str:
         print(response)
         return response
 
+
 def request_chat(host) :
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         ip = input("Provide IP for chat request: ")
         message = f"start:{ip}"
         s.sendto(message.encode("utf-8"), (host, 7778))
 
+
+def timeout_notifier(wait_time):
+    flip = 1
+    if wait_time > 0:
+        while wait_time > 0:
+            print(".",end="\n")
+            flip += 1
+            wait_time -= 1
+            time.sleep(1)
+        return True
+    return False
+
+
+
 def chat(host) :
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(5)
+        timeout = 5
+        timeout_printer = Process(target=timeout_notifier, args=(timeout,))
+        timeout_printer.start()     
+        s.settimeout(timeout)
+        
         while True:
             try:
                 reply, _ = s.recvfrom(1024)
+                timeout_printer.terminate()
+                    
                 response = reply.decode("utf-8")
                 print(f"Received message: {response}")
 
@@ -42,11 +66,24 @@ def chat(host) :
                 print(f"Error receiving data: {e}")
                 break
 
+
 def quit_daemon(host) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.sendto("q".encode("utf-8"), (host, 7778))
-        print("Disconnected from daemon.")
-        sys.exit(0)
+        s.settimeout(10)
+        while True:
+            try:
+                reply, _ = s.recvfrom(1024)
+                if reply:
+                    print("Daemon notified.Disconnecting from daemon.")
+                    sys.exit(0)
+            
+            except socket.timeout:
+                print("Timeout expired, forcibly clossing the connection with daemon.")
+                sys.exit(0)
+
+
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
@@ -64,7 +101,7 @@ if __name__ == "__main__":
             print("1. Start a new chat")
             print("2. Wait for requests")
             print("q. Quit")
-            option = input("Choose an option: ").strip()
+            option = input("\nChoose an option:").strip()
 
             if option == "1":
                 request_chat(daemon_ip)
