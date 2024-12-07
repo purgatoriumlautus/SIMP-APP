@@ -32,6 +32,7 @@ class HeaderType(Enum):
             return int(4).to_bytes(1, byteorder='big')
 
 
+
 class ErrorCode(Enum):
     OK = 0,
     TYPE_MISMATCH = 1,
@@ -39,6 +40,9 @@ class ErrorCode(Enum):
     MESSAGE_TOO_LONG = 3
     UNKNOWN_MESSAGE = 4
     WRONG_PAYLOAD = 5
+
+
+
 
 
 class HeaderInfo:
