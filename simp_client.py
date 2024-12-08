@@ -35,7 +35,7 @@ def timeout_notifier(wait_time):
 
 
 def chat(host) :
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    '''with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         timeout = 5
         timeout_printer = Process(target=timeout_notifier, args=(timeout,))
         timeout_printer.start()     
@@ -65,8 +65,11 @@ def chat(host) :
             except OSError as e:
                 print(f"Error receiving data: {e}")
                 break
-
-
+    '''
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        ip = input("Provide IP to wait for: ")
+        message = f"wait:{ip}"
+        s.sendto(message.encode("utf-8"), (host, 7778))
 def quit_daemon(host) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.sendto("q".encode("utf-8"), (host, 7778))
