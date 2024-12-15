@@ -13,6 +13,7 @@ MAX_HEADER_SIZE = 33
 client_name = None
 client_addr = None
 
+#class to identify message types
 class MessageType(Enum):
     CHAT = 0
     CONNECTION = 1
@@ -44,6 +45,7 @@ class MessageType(Enum):
             return int(8).to_bytes(1,byteorder="big")
 
 
+#header class
 class Header:
     type:MessageType
     username:str
@@ -51,7 +53,7 @@ class Header:
         self.type = None
         self.username = None
 
-
+#function to identify message type
 def get_message_type(msg):
     indicator = msg[0]
     
@@ -73,7 +75,7 @@ def get_message_type(msg):
         return MessageType.DECLINE
     return MessageType.ERROR
     
-
+#function to extract the username
 def extract_username(message):
     try:
         username = message[1:USERNAME_LENGHT+1]
@@ -81,7 +83,7 @@ def extract_username(message):
     except:
         return False
 
-
+#function to get payload from header
 def get_payload(msg):
     try:
         header = build_header(msg)
@@ -95,6 +97,7 @@ def get_payload(msg):
         return False
 
 
+#function that build a header
 def build_header(msg):
     header = Header()
 
@@ -109,7 +112,7 @@ def build_header(msg):
 
        
 
-
+#function to get username from input field
 def get_username():
     global username
     username = ""
@@ -131,25 +134,31 @@ def get_username():
             continue
 
 
+#function that builds connection with a daemon
 def connect(host) -> str:
     global server_socket
-    
+    server_socket.settimeout(60)
     username = get_username()
     msg_type = MessageType.CONNECTION.to_bytes()
     msg = b"".join([msg_type,username])
     print(f"requesting connection to {host}")
-    tries = 3
+    tries = 10
     while tries > 0:
         try:
             server_socket.sendto(msg, (host, 7778))
             server_socket.settimeout(3)
-            
+
             reply, _ = server_socket.recvfrom(1024)
             header = build_header(reply)
-
+            #if message type is CONNECTION, proceed to menu
             if header.type == MessageType.CONNECTION:
                 print("Connected to the daemon, entering the menu...")
                 menu()
+            #if message type is WAIT,decide on accepting or declining connection
+            elif header.type == MessageType.WAIT:
+                print("Connected to the daemon")
+                pending(host)
+            #if message type is ERROR then the daemon is already occupied
             elif header.type == MessageType.ERROR:
                 print("Daemon is already occupied, try another one")
                 sys.exit(0)
@@ -162,23 +171,59 @@ def connect(host) -> str:
     else:
         print("No reply from daemon, try another one")
 
+#functon that handles decision to accept or decline connection
+def pending(host):
+    global server_socket, t2
+    try:
+        print("For next 60 seconds will be opened for connections")
+        server_socket.settimeout(60)
+        reply, addr = server_socket.recvfrom(1024)
+        header = build_header(reply)
+        #if message type is REQUEST, make desicion and send to the daemon
+        if header.type == MessageType.REQUEST:
+            username = header.username
+            decision = ""
+            print(f"Connection request from {username}")
+            while decision not in ('y', 'yes', 'ye', 'n', 'no', 'nein'):
+                decision = input("Accept Connection Y/N: ").lower()
+                #if the decision is yes send ACCEPT message
+                if decision == 'y' or decision == 'yes' or decision == 'ye':
+                    msg_type = MessageType.ACCEPT.to_bytes()
+                    server_socket.sendto(msg_type, addr)
+                    print(f'Connection with {username} established')
 
+                    t2 = threading.Thread(target=receive_messages)
+                    t2.start()
+                    send_messages(host, header.username)
+                # if the decision is no send DECLINE message
+                elif decision in ('n', 'no', 'nein'):
+                    msg_type = MessageType.DECLINE.to_bytes()
+                    server_socket.sendto(msg_type, addr)
+                    print('Conncection declined, going back to main menu')
+
+    except socket.timeout:
+        print("No requests came, going back to menu")
+        menu()
+
+#function that waits for the connection
 def wait_for_connection(host):
     global server_socket,t2
     try:
         print("For next 60 seconds will be opened for connections")
         server_socket.settimeout(60)
+        #send WAIT message to daemon
         msg_type=MessageType.WAIT.to_bytes()
         server_socket.sendto(msg_type,(host,7778))
         reply,addr = server_socket.recvfrom(1024)
         header = build_header(reply)
+        # if message type is REQUEST, make desicion and send to the daemon
         if header.type == MessageType.REQUEST:
             username = header.username
             decision = ""
             print(f"Connection request from {username}")
             while decision not in ('y','yes','ye','n','no','nein'):
                 decision = input("Accept Connection Y/N: ").lower()
-
+                # if the decision is yes send ACCEPT message
                 if decision == 'y' or decision == 'yes' or decision == 'ye':
                     msg_type = MessageType.ACCEPT.to_bytes()
                     server_socket.sendto(msg_type,addr)
@@ -187,6 +232,7 @@ def wait_for_connection(host):
                     t2 = threading.Thread(target=receive_messages)
                     t2.start()
                     send_messages(host,header.username)
+                # if the decision is no send DECLINE message
                 elif decision in ('n','no','nein'):
                     msg_type= MessageType.DECLINE.to_bytes()
                     server_socket.sendto(msg_type,addr)
@@ -198,7 +244,7 @@ def wait_for_connection(host):
         menu()
             
 
-
+#function that asks to choose option
 def menu():
     
     while True:
@@ -222,13 +268,13 @@ def menu():
 
 
 
-
+#function to request the chat
 def request_chat(host) :
     global server_socket,t2
     while True:
         ip = input("Provide IP for chat request: ").encode()
         try:
-            
+            #send REQUEST message to daemon
             msg_type = MessageType.REQUEST.to_bytes()
             msg = b''.join([msg_type,ip])
             server_socket.sendto(msg,(host, 7778))
@@ -236,12 +282,14 @@ def request_chat(host) :
             print(f'Connection request to {ip.decode()} was send. Waiting for 60 seconds to reply')
             reply,_ = server_socket.recvfrom(1024)
             header = build_header(reply)
+            #if receive message is ACCEPT start receiving messages and send message with host and username
             if header.type == MessageType.ACCEPT:
                 print(f'successfully connected to {header.username}')
                 t2 = threading.Thread(target=receive_messages)
                 t2.start()
                 send_messages(host,header.username)
                 break
+            #if received message is DECLINE proceed to menu
             elif header.type == MessageType.DECLINE:
                 print(f"Connection was not accepted by {header.username}")
                 print("try again later")
@@ -253,17 +301,16 @@ def request_chat(host) :
             menu()
 
 
-
-
+#function to send messages to the daemon
 def send_messages(host,endhost_name) :
     global server_socket, username
     
     while True:
         try:
             #if client is the one who is going to send the message, he is the one if he was the one requesting the chat,but not waiting
-        
+
             msg = input()
-            
+            #if message is q send DISCONNECT_REQUEST to daemon and stop sending messages
             if msg.lower() == "q":
                 msg_type = MessageType.DISCONNECT_REQUEST.to_bytes()     
                 server_socket.sendto(msg_type,(host,7778))
@@ -275,13 +322,13 @@ def send_messages(host,endhost_name) :
             msg_type = MessageType.CHAT.to_bytes()
             msg = b''.join([msg_type,msg])
             server_socket.sendto(msg,(host,7778))
-            
-                
+
         except UnicodeEncodeError:
             print("only latin characters")
             continue
 
 
+#function to receive a message
 def receive_messages():
     global server_socket, username
     server_socket.settimeout(None)
@@ -289,17 +336,18 @@ def receive_messages():
         try:
             msg,_ = server_socket.recvfrom(1024)
             header = build_header(msg)
+            #if message type is CHAT print message
             if header.type == MessageType.CHAT:
-                print('\n')
                 print(header.username,">",get_payload(msg))
-                
-                continue    
+
+                continue
+            #if message type is DISCONNECT_REQUEST proceed to menu and stop receiving mesages
             elif header.type == MessageType.DISCONNECT_REQUEST:
                 print("companion left the chat, returning to menu")
                 print("type anything to be able to choose an option")
-                
                 menu()
                 break
+            #if message type is DISCONNECTION proceed to menu and stop receiving mesages
             elif header.type == MessageType.DISCONNECTION:
                 print("received confirmation")
                 menu()
@@ -310,12 +358,10 @@ def receive_messages():
             break
 
 
-    
-
-
-
+#function to quite the daemon
 def quit_daemon(host) -> None:
     global server_socket,daemon_ip
+    #send DISCONNECTION message to the daemon
     msg_type = MessageType.DISCONNECTION.to_bytes()
     server_socket.sendto(msg_type,(host,7778))
     server_socket.settimeout(10)
@@ -323,7 +369,7 @@ def quit_daemon(host) -> None:
         try:
             msg, addr = server_socket.recvfrom(1024)
             header = build_header(msg)
-            
+            #if mesage type is DISCONNECTION quit the daemon
             if header.type == MessageType.DISCONNECTION:
                 print("Daemon notified.Disconnecting from daemon.")
                 sys.exit(0)
@@ -336,12 +382,6 @@ def quit_daemon(host) -> None:
         except socket.timeout:
             print("Timeout expired, forcibly clossing the connection with daemon.")
             sys.exit(0)
-
-
-
-
-# atexit.register(quit_daemon(daemon_ip))
-
 
 
 
