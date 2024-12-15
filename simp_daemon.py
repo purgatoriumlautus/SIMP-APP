@@ -3,6 +3,10 @@ import socket
 from enum import Enum
 import time
 import threading
+from simp_client import build_header as build_client_header
+from simp_client import MessageType
+
+
 MAX_HEADER_SIZE = 39
 MIN_HEADER_SIZE = 35
 DATAGRAM_TYPE_SIZE = 1
@@ -12,8 +16,14 @@ MAX_USERNAME_SIZE = 32
 LENGTH_FIELD_SIZE = 4
 MAX_PAYLOAD_SIZE = 2048
 
+clients = []
+messages = []
 
 #datagram type class used to identify the type of the message (\x00 -> control, \x01 -> chat)
+
+
+
+
 
 class DatagramType(Enum):
     CONTROL = 0
@@ -72,7 +82,6 @@ class HeaderInfo:
     seq = None
     payload_size = None
     username = None
-    errors: list[ErrorType]
     
 
     def __init__(self):
@@ -146,7 +155,6 @@ def encode_username(username: str) -> bytes:
 
 
 #just for tests
-client_name = encode_username("Arsen")
 
 
 
@@ -293,6 +301,8 @@ def build_error_message(header):
 #it takes the message, extracts the header from it, if any errors found -> it will generate a reply containing the errors found in the header.
 #if no errors are found -> just generate the message with acknowledgement
 def build_reply(msg,host=None,port=None):
+    global clients
+    client_name = clients[0][0]
     header = build_header(msg)
     dtype = None
     operation = None
@@ -315,256 +325,433 @@ def build_reply(msg,host=None,port=None):
     return reply
 
 
-def build_chat_message(payload,client_name,seq):
+def build_chat_message(payload,seq):
+    global clients
     dtype = DatagramType.CHAT.to_bytes()
     operation = OperationType.MESSAGE.to_bytes()
     seq_byte = seq.to_bytes(1, byteorder='big')
-    username = client_name
-    msg = payload.encode()
+    username = encode_username(clients[0][0])
+    msg = payload
     payload_size = len(msg).to_bytes(length=4,byteorder='big')
     datagram = b''.join([dtype, operation, seq_byte,username,payload_size, msg])
     return datagram
 
-
-def send_chat_message(client_address, message, seq):
-    global client_name
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        datagram = build_chat_message(payload=message,client_name=client_name,seq=seq)
-        retries = 3
-        while retries > 0:
-            try:
-                print(f"{server_name}: Sending message to {client_address}: {message}")
-                s.sendto(datagram, client_address)
-                s.settimeout(5)
-                response, _ = s.recvfrom(1024)
-                ack_header = build_header(response)
-
-                if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
-                    ack_seq = int.from_bytes(response[2:3], byteorder='big')
-                    if ack_seq == seq:
-                        print(f"{server_name}: ACK received for sequence {seq}")
-                        return
-                    else:
-                        print(f"{server_name}: Unexpected ACK sequence: {ack_seq}")
-                else:
-                    print(f"{server_name}: Unexpected response: {response}")
-            except socket.timeout:
-                print(f"{server_name}: Timeout reached. Retransmitting message")
-                retries -= 1
-            except Exception as e:
-                print(f"{server_name}: Error: {e}. Retransmitting message")
-                retries -= 1
-
-        print("Failed to send message")
+def build_fin_message(seq):
+    global clients
+    dtype = DatagramType.CONTROL.to_bytes()
+    operation = OperationType.FIN.to_bytes()
+    seq_byte = seq.to_bytes(1,byteorder="big")
+    username = encode_username(clients[0][0])
+    datagram = b''.join([dtype,operation,seq_byte,username])
+    return datagram
 
 
-def receive_chat_message(server_address):
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.bind(server_address)
-        expected_seq = 0
-        while True:
-            data, sender_addr = s.recvfrom(1024)
-            header = build_header(data)
+def receive_chat_message():
+    global clients,daemon_socket,client_socket,messages,t1,t2
+    client_name = clients[0][0]
+    while True:
+        daemon_socket.settimeout(None)
+        msg, sender_addr = daemon_socket.recvfrom(1024)
+        header = build_header(msg)
+        if header.type == DatagramType.CHAT and header.operation == OperationType.MESSAGE:
 
-            if header.type == DatagramType.CHAT and header.operation == OperationType.MESSAGE:
-                seq = int.from_bytes(data[2:3], byteorder='big')
-                message = data[3:].decode('utf-8')
-                print(f"{server_name}: Received message from {sender_addr}: {message}")
+            message = get_msg_payload(msg)
+            print(f"{server_name}: Received message from {sender_addr}: {message.decode('ascii')}")
+            msg_type = MessageType.CHAT.to_bytes()
+            usrname = encode_username(header.username)
+            msg = b''.join([msg_type,usrname,message])
+            client_socket.sendto(msg,clients[0][1])
+        elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
+            print('received FIN request, closing the connection')
+            clients.pop(1)
+            msg_type = MessageType.DISCONNECT_REQUEST.to_bytes()
+            usrname = encode_username(header.username)
+            client_socket.sendto(msg_type,clients[0][1])
+            client_commands()
+            break
 
-                if seq == expected_seq:
-                    dtype = DatagramType.CONTROL.to_bytes()
-                    operation = OperationType.ACK.to_bytes()
-                    seq_byte = seq.to_bytes(1, byteorder='big')
-                    ack = b''.join([dtype, operation, seq_byte,client_name])
-                    s.sendto(ack, sender_addr)
-                    print(f"{server_name}: Acknowledgment sent for sequence {seq}.")
-                    expected_seq = (expected_seq + 1) % 2
 
-                else:
-                    print(f"{server_name}: Unexpected sequence number: {seq}. Discarding message")
+def send_chat_message(message='',type=True):
+    global clients,daemon_socket,client_socket,messages
 
-            elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
-                print(f"{server_name}: FIN received from {sender_addr}. Sending ACK")
-                dtype = DatagramType.CONTROL.to_bytes()
-                operation = OperationType.ACK.to_bytes()
-                seq_byte = data[2:3]
-                ack = b''.join([dtype, operation, seq_byte])
-                s.sendto(ack, sender_addr)
-                print(f"{server_name}: Connection terminated.")
-                break
+    if type:
+        message = build_chat_message(message,seq=0)
+    else:
+        message = build_fin_message(0)
+    if len(clients) > 1:
+        daemon_socket.sendto(message,clients[1][1])
+        print(f"sending message to {clients[1][1]} {message}")
+    else:
+        print("cant reach t, discarding")
+        return False
+
+
+# def send_chat_message(client_address,seq=0,message="",type=True):
+#     global clients,daemon_socket,client_socket
+#     client_name = clients[0][0]
+#     if type:
+#         datagram = build_chat_message(payload=message,client_name=client_name,seq=seq)
+#     else:
+#         datagram = build_fin_message(seq=seq)
+#     retries = 3
+#     while retries > 0:
+#         try:
+#             print(f"{server_name}: Sending message to {client_address}: {message}")
+#             daemon_socket.sendto(datagram, client_address)
+#             daemon_socket.settimeout(5)
+#             response, _ = daemon_socket.recvfrom(1024)
+#             ack_header = build_header(response)
+
+#             if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
+#                 ack_seq = int.from_bytes(response[2:3], byteorder='big')
+#                 if ack_seq == seq:
+#                     print(f"{server_name}: ACK received for sequence {seq}")
+#                     return True
+#                 else:
+#                     print(f"{server_name}: Unexpected ACK sequence: {ack_seq}")
+                    
+#             else:
+#                 print(f"{server_name}: Unexpected response: {response}")
+#         except socket.timeout:
+#             print(f"{server_name}: Timeout reached. Retransmitting message")
+#             retries -= 1
+#         except Exception as e:
+#             print(f"{server_name}: Error: {e}. Retransmitting message")
+#             retries -= 1
+#             return False
+
+#         print("Failed to send message, lost connection with another daemon, closing the connection")
+#         clients.pop(2)
+#         msg_type = MessageType.DISCONNECTION.to_bytes()
+#         client_socket.sendto(msg_type,client_address)
+#         client_commands()
+
+
+
+
+# def receive_chat_message():
+#     global clients,daemon_socket,client_socket,messages
+#     client_name = clients[0][0]
+#     expected_seq = 0
+#     while True:
+#         msg, sender_addr = daemon_socket.recvfrom(1024)
+#         header = build_header(msg)
+
+#         if header.type == DatagramType.CHAT and header.operation == OperationType.MESSAGE:
+#             seq = int.from_bytes(msg[2:3], byteorder='big')
+#             message = get_msg_payload(msg).decode('ascii')
+#             print(f"{server_name}: Received message from {sender_addr}: {message}")
+
+#             if seq == expected_seq:
+#                 dtype = DatagramType.CONTROL.to_bytes()
+#                 operation = OperationType.ACK.to_bytes()
+#                 seq_byte = seq.to_bytes(1, byteorder='big')
+#                 ack = b''.join([dtype, operation, seq_byte,client_name])
+#                 daemon_socket.sendto(ack, sender_addr)
+#                 print(f"{server_name}: Acknowledgment sent for sequence {seq}.")
+                
+#                 expected_seq = (expected_seq + 1) % 2
+#                 messages.append(message)
+#                 return True
+#             else:
+#                 print(f"{server_name}: Unexpected sequence number: {seq}. Discarding message")
+#                 return False
+        
+#         elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
+#             print(f"{server_name}: FIN received from {sender_addr}. Sending ACK")
+#             dtype = DatagramType.CONTROL.to_bytes()
+#             operation = OperationType.ACK.to_bytes()
+#             seq_byte = msg[2:3]
+#             ack = b''.join([dtype, operation, seq_byte])
+#             daemon_socket.sendto(ack, sender_addr)
+
+#             print(f"{server_name}: Connection terminatation request received, notifiying the client..")
+#             msg_type = MessageType.DISCONNECT_REQUEST.to_bytes()
+#             client_socket.sendto(msg_type,clients[0][1])
+#             break
 
 
 
 def request_connection(host, port):
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.settimeout(5)
+    global clients,daemon_socket,client_socket,t1,t2
+    client_name = clients[0][0]
+    client_addr = clients[0][1]
+    
+    daemon_socket.settimeout(30)
+    dtype = DatagramType.CONTROL.to_bytes()
+    operation = OperationType.SYN.to_bytes()
+    seq = int(0).to_bytes(1, byteorder='big')
+    username = encode_username(client_name)
+    msg = b''.join([dtype, operation, seq, username])
+
+    print(f"{server_name}: Sending SYN to {host}:{port}.")
+    daemon_socket.sendto(msg, (host, port))
+
+    response, server_address = daemon_socket.recvfrom(1024)
+    print(f"{server_name}: Received response from {server_address}")
+    header = build_header(response)
+    
+    if header.type == DatagramType.CONTROL and header.operation == (OperationType.SYN.value | OperationType.ACK.value):
+        
+        print(f"{server_name}: SYN+ACK received. Sending final ACK")
+        dtype1 = DatagramType.CONTROL.to_bytes()
+        operation1 = OperationType.ACK.to_bytes()
+        ack_msg = b''.join([dtype1, operation1, seq, username])
+        daemon_socket.sendto(ack_msg, (host, port))
+        
+        msg_type = MessageType.ACCEPT.to_bytes()
+        username = encode_username(header.username)
+        client_socket.sendto(b''.join([msg_type,username]),client_addr)
+        clients.append((header.username,server_address))
+        
+        print(f"{server_name}: Connection established")
+        t1 = threading.Thread(target=receive_chat_message,daemon=True)
+        t1.start()
+        t2 = threading.Thread(target=chat_with_client(False))
+        t2.start()
+        return True
+    
+    elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
+        msg_type = MessageType.DECLINE.to_bytes()
+        username = encode_username(header.username)
+        client_socket.sendto(b''.join([msg_type,username]),client_addr)
+        print(f"{server_name}: FIN received. Connection declined")
+        return False
+    else:
+        msg_type = MessageType.DECLINE.to_bytes()
+
+        client_socket.sendto(msg_type,client_addr)
+        print(f"{server_name}: FIN received. Connection declined")
+        client_commands()
+
+    # except socket.timeout:
+    #     msg_type = MessageType.DECLINE.to_bytes()
+    #     client_socket.sendto(msg_type,client_addr)
+    #     print(f"{server_name}: Connection timed out. No response from the server")
+    #     client_commands(host)
+    
+
+
+
+def wait_for_connection():
+    global clients,client_socket,daemon_socket,t1,t2
+    client_name = clients[0][0]
+    client_addr = clients[0][1]
+    
+    print(f"{server_name}: Waiting for connections for 60 seconds")
+    daemon_socket.settimeout(60)
+    response, server_address = daemon_socket.recvfrom(1024)
+    header = build_header(response)
+    try:
+        if header.type == DatagramType.CONTROL and header.operation == OperationType.SYN and len(clients)!= 2:
+            print(f"{server_name}: SYN received from {server_address}. Need client's decision.")
+            msg_type = MessageType.REQUEST.to_bytes()
+            
+            username_end = encode_username(header.username)             
+            orig_endname = header.username
+            msg = b''.join([msg_type,username_end])
+            
+            client_socket.sendto(msg,client_addr)
+            daemon_socket.settimeout(60)
+            user_respond,_ = client_socket.recvfrom(1024)
+            print(f'{server_name}: received decision,{user_respond}')
+            
+            header = build_client_header(user_respond)
+            print(header.type)
+            if header.type == MessageType.ACCEPT:
+                dtype = DatagramType.CONTROL.to_bytes()
+                operation = (OperationType.SYN.value | OperationType.ACK.value).to_bytes(1, byteorder='big')
+                seq = int(0).to_bytes(1, byteorder='big')
+                username = encode_username(client_name)
+                msg = b''.join([dtype, operation, seq, username])
+                daemon_socket.sendto(msg, server_address)
+                
+                final_ack, server_address = daemon_socket.recvfrom(1024)
+                ack_header = build_header(final_ack)
+                if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
+                    print(f"{server_name}: Final ACK received. Connection established")
+                    clients.append((orig_endname,server_address))
+                    t1 = threading.Thread(target=receive_chat_message,daemon=True)
+                    t1.start()
+                    t2 = threading.Thread(target=chat_with_client(True))
+                    t2.start() 
+   
+                else:
+                    print(f"{server_name}: Unexpected response. Connection setup failed")
+                    msg_type = MessageType.ERROR.to_bytes()
+                    client_socket.sendto(msg_type,client_addr)
+                    client_commands()
+                        
+            elif header.type == MessageType.DECLINE:
+                dtype = DatagramType.CONTROL.to_bytes()
+                op = OperationType.FIN.to_bytes()
+                seq = int(0).to_bytes(1,byteorder='big')
+                username = encode_username(client_name)
+                msg = b''.join([dtype,op,seq,username])
+                daemon_socket.sendto(msg,server_address)
+                client_commands()
+        else:
+            print(f"{server_name}: Unexpected or invalid SYN message. Connection setup aborted.")
+            msg_type = MessageType.ERROR.to_bytes()
+            client_socket.sendto(msg_type,client_addr)
+            client_commands()
+    except socket.timeout:
+        print("No requests came, going back to client commands")
+        client_commands()
+
+
+def decline_connection():
+    global clients,daemon_socket,client_socket
+    client_name = clients[0][0]
+   
+    response, server_address = daemon_socket.recvfrom(1024)
+    header = build_header(response)
+
+    if header.type == DatagramType.CONTROL and header.operation == OperationType.SYN:
+        print(f"{server_name}: SYN received from {server_address}. Sending FIN")
         dtype = DatagramType.CONTROL.to_bytes()
-        operation = OperationType.SYN.to_bytes()
+        operation = OperationType.FIN.to_bytes()
         seq = int(0).to_bytes(1, byteorder='big')
         username = client_name
         msg = b''.join([dtype, operation, seq, username])
+        print(msg)
+        daemon_socket.sendto(msg, server_address)
 
-        print(f"{server_name}: Sending SYN to {host}:{port}.")
-        s.sendto(msg, (host, port))
+        final_ack, _ = daemon_socket.recvfrom(1024)
+        ack_header = build_header(final_ack)
 
-        try:
-            response, server_address = s.recvfrom(1024)
-            print(f"{server_name}: Received response from {server_address}")
-
-            header = build_header(response)
-            if header.type == DatagramType.CONTROL and header.operation == (OperationType.SYN.value | OperationType.ACK.value):
-                print(f"{server_name}: SYN+ACK received. Sending final ACK")
-                dtype1 = DatagramType.CONTROL.to_bytes()
-                operation1 = OperationType.ACK.to_bytes()
-                ack_msg = b''.join([dtype1, operation1, seq, username])
-                s.sendto(ack_msg, server_address)
-                print(f"{server_name}: Connection established")
-                return server_address
-            elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
-                print(f"{server_name}: FIN received. Connection declined")
-            else:
-                print(f"{server_name}: Unexpected response")
-                # Respond with error message and FIN
-                dtype1 = DatagramType.CONTROL.to_bytes()
-                operation1 = OperationType.ERR.to_bytes()
-                err_msg = "User already in another chat".encode()
-                err_datagram = b''.join([dtype1, operation1, seq, err_msg, OperationType.FIN.to_bytes()])
-                s.sendto(err_datagram, server_address)
-        except socket.timeout:
-            print(f"{server_name}: Connection timed out. No response from the server")
-
-
-def accept_connection(host, port):
-    global client_name
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.bind((host, port))
-        print(f"{server_name}: Waiting for connection from {host}:{port}")
-        response, server_address = s.recvfrom(1024)
-
-        header = build_header(response)
-        if header.type == DatagramType.CONTROL and header.operation == OperationType.SYN:
-            print(f"{server_name}: SYN received from {server_address}. Sending SYN+ACK")
-            dtype = DatagramType.CONTROL.to_bytes()
-            operation = (OperationType.SYN.value | OperationType.ACK.value).to_bytes(1, byteorder='big')
-            seq = int(0).to_bytes(1, byteorder='big')
-            username = client_name
-            msg = b''.join([dtype, operation, seq, username])
-            print(msg)
-            s.sendto(msg, server_address)
-
-            final_ack, server_address = s.recvfrom(1024)
-            ack_header = build_header(final_ack)
-
-            if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
-                print(f"{server_name}: Final ACK received. Connection established")
-                return (host,port)
-            else:
-                print(f"{server_name}: Unexpected response. Connection setup failed")
+        if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
+            print(f"{server_name}: Final ACK received. Connection declined")
         else:
-            print(f"{server_name}: Unexpected or invalid SYN message. Connection setup aborted.")
+            print(f"{server_name}: Unexpected response. Connection setup failed")
+    else:
+        print(f"{server_name}: Unexpected or invalid SYN message. Connection setup aborted")
 
 
-def decline_connection(host, port,):
-    global client_name
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.bind((host, port))
-        response, server_address = s.recvfrom(1024)
+#CLIENT COMMUNICATION 
+def wait_for_client():
+    global clients,client_socket
+    print(f"{server_name}: Daemon is waiting for client connections...")
+    while True:
+        msg, addr = client_socket.recvfrom(1024)
+        header = build_client_header(msg)
 
-        header = build_header(response)
-        if header.type == DatagramType.CONTROL and header.operation == OperationType.SYN:
-            print(f"{server_name}: SYN received from {server_address}. Sending FIN")
-            dtype = DatagramType.CONTROL.to_bytes()
-            operation = OperationType.FIN.to_bytes()
-            seq = int(0).to_bytes(1, byteorder='big')
-            username = client_name
-            msg = b''.join([dtype, operation, seq, username])
-            print(msg)
-            s.sendto(msg, server_address)
-
-            final_ack, _ = s.recvfrom(1024)
-            ack_header = build_header(final_ack)
-
-            if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
-                print(f"{server_name}: Final ACK received. Connection declined")
-            else:
-                print(f"{server_name}: Unexpected response. Connection setup failed")
+        if len(clients)==0:
+            if header.type == MessageType.CONNECTION:
+                username = msg[1:].decode('ascii').rstrip('\x00')
+                clients.append((username,addr))
+                msg_type = MessageType.CONNECTION.to_bytes()
+                client_socket.sendto(msg_type,addr)
+                print(f"Established connection with client: {clients[0][0]} address {addr}")
+                client_commands()
         else:
-            print(f"{server_name}: Unexpected or invalid SYN message. Connection setup aborted")
+            print(f"THE DAEMON IS ALREADY OCCUPIED BY {clients[0][0]} {addr}, rejecting the conncetion")
+            msg_type = MessageType.ERROR.to_bytes()
+            payload = "This daemon is already occupied".encode('ascii')
+            client_socket.sendto(b''.join([msg_type,payload]),addr)
 
 
-def wait_for_client(host: str):
-    global client_name
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.bind((host, 7778))
-        print(f"{server_name}: Daemon is waiting for client connections...")
-        while True:
-            data, client_addr = s.recvfrom(1024)
-            data = data.decode('utf-8')
-            print(f"{server_name}: Received data from {client_addr}: {data}")
 
-            if data == 'q':
-                response_message = f"{server_name}: Received termination request: {data}"
-                s.sendto(response_message.encode("utf-8"), client_addr)
-                continue
+def client_commands():
+    global clients,client_socket,server_name
+    
+    client_name = clients[0][0]
+    client_addr = clients[0][1]
+    while True:
+        print(f"{server_name}: Daemon is waiting for client commands...")
+        msg, addr = client_socket.recvfrom(1024)
+        header = build_client_header(msg)
+ 
 
-            if data.startswith("start"):
-                host1 = data.split(":")[1]
-                print(f"{server_name}: Starting connection handshake with {host1}")
-                request_connection(host1, 7777, "Daemon")
+        if header.type == MessageType.DISCONNECTION:
+            msg_type = MessageType.DISCONNECTION.to_bytes()
+            print(f"{server_name}: Received termination request from {client_name}")
+            client_socket.sendto(msg_type, client_addr)
+            del clients[0]
+            wait_for_client()
 
-            elif data.startswith("wait"):
-                host1 = data.split(":")[1]
-                print(f"{server_name}: Waiting for a connection request from {host1}")
-                accept_connection(host1, 7777, "Daemon")
+        if header.type == MessageType.REQUEST:
+            ip = msg[1:].decode()
+            print(f"{server_name}: Starting connection handshake with {ip}")
+            request_connection(ip, 7777)
 
-            response_message = f"Received: {data}"
-            print(f"{server_name}: Sending response to {client_addr}: {response_message}")
-            s.sendto(response_message.encode("utf-8"), client_addr)
+        elif header.type == MessageType.WAIT:
+            print(f'{server_name}: Received wait request from client')
+            wait_for_connection()
+
+
+
+
+#this function needed to communicate between client and daemon, and then use send_chat_message and receive_chat_message to communicate between daemons
+def chat_with_client(flag = True):
+    global clients,client_socket,server_name,daemon_socket,messages,t1,t2
+    client_name = clients[0][0]
+    client_addr = clients[0][1]
+    print('started receiving messages from client')
+    while True:
+
+        msg,_ = client_socket.recvfrom(1024)
+        header = build_client_header(msg)
+        if header.type == MessageType.CHAT:
+            print('received message from client',msg[1:])
+            send_chat_message(msg,type=True)
+        
+        elif header.type == MessageType.DISCONNECT_REQUEST:
+            print("received disconnection request from client")
+            send_chat_message(type=False)
+            t1.join()
+            t2.join()
+            print('notified another daemon, notyfying the client')
+            client_commands()
+            break
+            
+
 
 
 
 #for demonstration
-def start_server():
-    global client_name
-    global server_name
-    server_name = "Server 1"
-    host = '127.0.0.1'
-    port = 7777
-    client_name = encode_username("Server")
+def start_server(address):
+    global server_name, daemon_socket, client_socket
+    server_name = "Server" + str(time.time())[-1]
+    daemon_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    daemon_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    daemon_socket.bind((address, 7777))
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    client_socket.bind((address, 7778))
+    wait_for_client()
 
-    client_address = accept_connection(host, port)
-    if client_address:
-        receive_chat_message(client_address)
+   
 
 
-def start_client():
-    global client_name 
-    global server_name
-    server_name = "Server 2"
-    host = '127.0.0.1'
-    port = 7777
-    client_name = encode_username("Cliient")
-    server_address = request_connection(host, port)
+# def start_client():
+#     global client_name 
+#     global server_name
+#     server_name = "Server 2"
+#     host = '127.0.0.1'
+#     port = 7777
+#     client_name = encode_username("Cliient")
+#     server_address = request_connection(host, port)
 
-    messages = ["Hello", "Bye"]
-    if server_address:
-       send_chat_message(server_address, messages[0], seq=0)
-       send_chat_message(server_address, messages[1], seq=1)
+#     messages = ["Hello", "Bye"]
+#     if server_address:
+#        send_chat_message(server_address, messages[0], seq=0)
+#        send_chat_message(server_address, messages[1], seq=1)
 
 
 
 if __name__ == "__main__":
 
-    server_thread = threading.Thread(target=start_server, daemon=True)
-    client_thread = threading.Thread(target=start_client, daemon=True)
+    
+    if len(sys.argv) != 2:
+        print("Usage: python daemon.py <server_ip>")
+        sys.exit(1)
 
+    server_thread = threading.Thread(target=start_server,args=(sys.argv[1],))
+  
     server_thread.start()
-    client_thread.start()
+    # server_thread.join()
 
-    server_thread.join()
-    client_thread.join()
-
-    print("[Main] Testing completed.")
 
 '''
 if __name__ == "__main__":

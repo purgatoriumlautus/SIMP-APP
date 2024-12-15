@@ -6,6 +6,9 @@ import string
 import struct
 
 
+
+
+
 def send(host, port, message_type, message) -> string:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         payload_size = 0
