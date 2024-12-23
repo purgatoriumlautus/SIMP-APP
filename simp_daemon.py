@@ -18,7 +18,9 @@ MAX_PAYLOAD_SIZE = 2048
 clients = []
 messages = []
 pending_requests = []
-
+ack_received = {}
+ack_lock = threading.Lock()
+disconnected = False
 # datagram type class used to identify the type of the message (\x00 -> control, \x01 -> chat)
 
 
@@ -123,6 +125,8 @@ def get_operation_type(msg):
             return OperationType.FIN
         elif op == 6:
             return OperationType.SYN.value | OperationType.ACK.value
+        elif op == 12:
+            return OperationType.FIN.value | OperationType.ACK.value
         else:
             return OperationType.UNKNOWN
 
@@ -346,50 +350,82 @@ def build_ack_message(seq):
 
 #function that handles reciving of chat messages from another daemon
 def receive_chat_message():
-    global clients, daemon_socket, client_socket, messages, t1, t2
+    global clients, daemon_socket, client_socket, messages, t1, t2, ack_received, disconnected
     client_name = clients[0][0]
+
     while True:
+        if disconnected:
+            print(f"{server_name}: Connection is disconnected. No further messages will be received.")
+            client_commands()
+            break  # Exit if the connection is disconnected
+
         daemon_socket.settimeout(None)
         msg, sender_addr = daemon_socket.recvfrom(1024)
         header = build_header(msg)
-        #if the datagram type is CHAT and operation type is MESSAGE, sends the message to the client
+
         if header.type == DatagramType.CHAT and header.operation == OperationType.MESSAGE:
-            message = get_msg_payload(msg)
-            print(f"{server_name}: Received message from {sender_addr}: {message.decode('ascii')}")
-            msg_type = MessageType.CHAT.to_bytes()
-            usrname = encode_username(header.username)
-            msg = b''.join([msg_type, usrname, message])
-            client_socket.sendto(msg, clients[0][1])
-        #if the datagram type is CONTROL and operation type is FIN, sends DISCONNECT_REQUEST to the client
-        # and stops receiving messages
+            if not disconnected:  # Prevent sending chat messages if disconnected
+                message = get_msg_payload(msg)
+                print(f"{server_name}: Received message from {sender_addr}: {message.decode('ascii')}")
+                msg_type = MessageType.CHAT.to_bytes()
+                username = encode_username(header.username)
+                msg = b''.join([msg_type, username, message])
+                client_socket.sendto(msg, clients[0][1])
+
+                seq = header.seq.to_bytes(1, byteorder='big')
+                dtype1 = DatagramType.CONTROL.to_bytes()
+                operation1 = OperationType.ACK.to_bytes()
+                ack_msg = b''.join([dtype1, operation1, seq, username])
+                # Sends ACK
+                daemon_socket.sendto(ack_msg, sender_addr)
+                print(f"Sending acknowledgement for message with seq {seq}")
+
+        elif header.type == DatagramType.CONTROL and header.operation == OperationType.ACK:
+            seq = header.seq
+            with ack_lock:
+                ack_received[seq] = True
+            print(f"ACK received for seq {seq} from {sender_addr}")
+        elif header.type == DatagramType.CONTROL and header.operation == (
+                OperationType.FIN.value | OperationType.ACK.value):
+            disconnected = True
+
         elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
-            print('received FIN request, closing the connection')
-            clients.pop(1)
+            print(f"{server_name}: Received FIN request, closing the connection.")
+            clients.pop(1)  # Clean up clients list (remove client info)
+
+            # Send a DISCONNECT_REQUEST to notify client about disconnection
             msg_type = MessageType.DISCONNECT_REQUEST.to_bytes()
             username = encode_username(header.username)
-            client_socket.sendto(msg_type, clients[0][1])
-            client_commands()
+            client_socket.sendto(b''.join([msg_type, username]), clients[0][1])
+            seq = header.seq.to_bytes(1, byteorder='big')
+            dtype1 = DatagramType.CONTROL.to_bytes()
+            operation1 = (OperationType.FIN.value | OperationType.ACK.value).to_bytes(1, byteorder='big')
+            ack_msg = b''.join([dtype1, operation1, seq, encode_username(header.username)])
+            daemon_socket.sendto(ack_msg, sender_addr)
+            print(f"Sending acknowledgement for FIN request with seq {seq}")
+
+            # Set disconnection flag to True and exit loop
+            disconnected = True
+            print(f"{server_name}: Daemon is disconnected and stopping communication.")
             break
 
-
 #function that handles sending of chat messages
-def send_chat_message(message='', type=True):
+def send_chat_message(message='', type=True, seq=0):
     global clients, daemon_socket, client_socket, messages
-    #if the message is not a fin message it builds a chat message, if a fin builds a fin message
-    #if there is more than one client sends a message
 
     if len(clients) > 1:
         if type:
-            message = build_chat_message(message, seq=0)
+            message = build_chat_message(message, seq)
             daemon_socket.sendto(message, clients[1][1])
-            print(f"sending message to {clients[1][1]} {message}")
+            print(f"Sending message to {clients[1][1]}: {message}")
+
         else:
             message = build_fin_message(0)
             daemon_socket.sendto(message, clients[1][1])
-            print(f"sending message to {clients[1][1]} {message}")
+            print(f"Sending FIN message to {clients[1][1]}: {message}")
             return False
     else:
-        print("cant reach, discarding")
+        print("Cannot reach another client, discarding message")
         return False
 
 
@@ -431,7 +467,7 @@ def request_connection(host, port):
         t1 = threading.Thread(target=receive_chat_message, daemon=True)
         t1.start()
         #Start chat with client
-        t2 = threading.Thread(target=chat_with_client(False))
+        t2 = threading.Thread(target=chat_with_client, args=(False,))
         t2.start()
         return True
     #if received operation type is FIN connection is declined
@@ -686,29 +722,82 @@ def client_commands():
             wait_for_connection()
 
 
-#this function needed to communicate between client and daemon, and then use send_chat_message and receive_chat_message to communicate between daemons
+#function that simulates stop and wait strategy
+def stop_and_wait_send(message, seq, type=True):
+    global ack_received, disconnected
+
+    if disconnected:
+        print("Connection is disconnected. No further messages will be sent.")
+        return False  # Early return if disconnected
+
+    retries = 3
+    with ack_lock:
+        ack_received[seq] = False  # Reset ACK status for the given seq
+
+    for attempt in range(retries):
+        print(f"Attempt {attempt + 1}/{retries}: Sending message with seq {seq}")
+
+        # Send message
+        send_chat_message(message=message, seq=seq, type=type)
+
+        # Wait for acknowledgment
+        start_time = time.time()
+        while time.time() - start_time < 5:
+            with ack_lock:
+                if ack_received.get(seq, False):
+                    print(f"ACK received for seq {seq}.")
+                    print(ack_received)
+                    del ack_received[seq]  # Remove ACK entry after processing
+                    print(ack_received)
+                    return True  # Successfully acknowledged
+            time.sleep(0.1)
+
+        print(f"No ACK received for seq {seq} within timeout. Retrying...")
+
+    print(f"Failed to receive ACK for seq {seq} after {retries} retries.")
+    return False  # If all retries fail
+
 def chat_with_client(flag=True):
-    global clients, client_socket, server_name, daemon_socket, messages, t1, t2
+    global clients, client_socket, server_name, daemon_socket, messages, t1, t2, ack_received, disconnected
     client_name = clients[0][0]
     client_addr = clients[0][1]
-    print('started receiving messages from client')
-    #recieves messages from the client and sends messages to another daemon
+    print('Started receiving messages from client')
+
+    seq = 0  # Initialize sequence number, can only be 0 or 1
+
     while True:
+        if disconnected:
+            print(f"{server_name}: Connection is disconnected. No further messages will be sent.")
+            client_commands()
+            break
+
 
         msg, _ = client_socket.recvfrom(1024)
         header = build_client_header(msg)
+
         if header.type == MessageType.CHAT:
-            print('received message from client', msg[1:])
-            send_chat_message(msg, type=True)
-        #if daemon receives DISCONNECT_REQUEST from the client sends disconnect message to another daemon and stops receiving messages from the client
+            if not disconnected:  # Prevent sending chat messages if disconnected
+                print('Received message from client:', msg[1:])
+                if stop_and_wait_send(message=msg, seq=seq):
+                    print(f"Message with seq {seq} successfully sent and acknowledged.")
+                else:
+                    print(f"Failed to deliver message with seq {seq} after retries.")
+                seq = 1 - seq
+
         elif header.type == MessageType.DISCONNECT_REQUEST:
-            print("received disconnection request from client")
-            send_chat_message(type=False)
-            t1.join()
-            t2.join()
-            print('notified another daemon, notyfying the client')
-            client_commands()
-            break
+            send_chat_message(type = False)
+
+            seq = 1 - seq
+            if t1.is_alive():
+                t1.join()
+            if t2.is_alive():
+                t2.join()
+
+            disconnected = True  # Set disconnected flag to stop further communication
+            print(f"{server_name}: Daemon is disconnected and waiting for new commands.")
+
+            break  # Exit the loop after disconnecting
+
 
 
 #function that starts the server and calls function to wait for the client
