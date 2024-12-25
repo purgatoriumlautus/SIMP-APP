@@ -20,7 +20,8 @@ messages = []
 pending_requests = []
 ack_received = {}
 ack_lock = threading.Lock()
-disconnected = False
+disconnected = True
+
 # datagram type class used to identify the type of the message (\x00 -> control, \x01 -> chat)
 
 
@@ -350,19 +351,24 @@ def build_ack_message(seq):
 
 #function that handles reciving of chat messages from another daemon
 def receive_chat_message():
-    global clients, daemon_socket, client_socket, messages, t1, t2, ack_received, disconnected
+    global clients, daemon_socket, client_socket, messages, t1, ack_received, disconnected
     client_name = clients[0][0]
 
     while True:
         if disconnected:
             print(f"{server_name}: Connection is disconnected. No further messages will be received.")
+            clients.pop(1)
             client_commands()
             break  # Exit if the connection is disconnected
+        try:
 
-        daemon_socket.settimeout(None)
-        msg, sender_addr = daemon_socket.recvfrom(1024)
-        header = build_header(msg)
-
+            daemon_socket.settimeout(5)
+            msg, sender_addr = daemon_socket.recvfrom(1024)
+            header = build_header(msg)
+        except socket.timeout:
+            print("log listening for client")
+            continue
+        
         if header.type == DatagramType.CHAT and header.operation == OperationType.MESSAGE:
             if not disconnected:  # Prevent sending chat messages if disconnected
                 message = get_msg_payload(msg)
@@ -407,6 +413,7 @@ def receive_chat_message():
             # Set disconnection flag to True and exit loop
             disconnected = True
             print(f"{server_name}: Daemon is disconnected and stopping communication.")
+            client_commands()
             break
 
 #function that handles sending of chat messages
@@ -418,7 +425,6 @@ def send_chat_message(message='', type=True, seq=0):
             message = build_chat_message(message, seq)
             daemon_socket.sendto(message, clients[1][1])
             print(f"Sending message to {clients[1][1]}: {message}")
-
         else:
             message = build_fin_message(0)
             daemon_socket.sendto(message, clients[1][1])
@@ -431,7 +437,7 @@ def send_chat_message(message='', type=True, seq=0):
 
 #function to request connection to another daemon using tree-way handshake
 def request_connection(host, port):
-    global clients, daemon_socket, client_socket, t1, t2
+    global clients, daemon_socket, client_socket, t1, disconnected
     client_name = clients[0][0]
     client_addr = clients[0][1]
 
@@ -443,52 +449,60 @@ def request_connection(host, port):
     msg = b''.join([dtype, operation, seq, username])
     #Sends SYN
     print(f"{server_name}: Sending SYN to {host}:{port}.")
-    daemon_socket.sendto(msg, (host, port))
+    try:
+        daemon_socket.sendto(msg, (host, port))
 
-    response, server_address = daemon_socket.recvfrom(1024)
-    print(f"{server_name}: Received response from {server_address}")
-    header = build_header(response)
-    #checks if datagram type is CONTROL and operation type is a combination of SYN + ACK
-    if header.type == DatagramType.CONTROL and header.operation == (OperationType.SYN.value | OperationType.ACK.value):
+        response, server_address = daemon_socket.recvfrom(1024)
+        print(f"{server_name}: Received response from {server_address}")
+        header = build_header(response)
+        #checks if datagram type is CONTROL and operation type is a combination of SYN + ACK
+        if header.type == DatagramType.CONTROL and header.operation == (OperationType.SYN.value | OperationType.ACK.value):
 
-        print(f"{server_name}: SYN+ACK received. Sending final ACK")
-        dtype1 = DatagramType.CONTROL.to_bytes()
-        operation1 = OperationType.ACK.to_bytes()
-        ack_msg = b''.join([dtype1, operation1, seq, username])
-        #Sends ACK
-        daemon_socket.sendto(ack_msg, (host, port))
+            print(f"{server_name}: SYN+ACK received. Sending final ACK")
+            dtype1 = DatagramType.CONTROL.to_bytes()
+            operation1 = OperationType.ACK.to_bytes()
+            ack_msg = b''.join([dtype1, operation1, seq, username])
+            #Sends ACK
+            daemon_socket.sendto(ack_msg, (host, port))
 
-        msg_type = MessageType.ACCEPT.to_bytes()
-        username = encode_username(header.username)
-        client_socket.sendto(b''.join([msg_type, username]), client_addr)
-        clients.append((header.username, server_address))
-        #Start receiving chat messages from another daemon
-        print(f"{server_name}: Connection established")
-        t1 = threading.Thread(target=receive_chat_message, daemon=True)
-        t1.start()
-        #Start chat with client
-        t2 = threading.Thread(target=chat_with_client, args=(False,))
-        t2.start()
-        return True
-    #if received operation type is FIN connection is declined
-    elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
-        msg_type = MessageType.DECLINE.to_bytes()
-        username = encode_username(header.username)
-        client_socket.sendto(b''.join([msg_type, username]), client_addr)
-        print(f"{server_name}: FIN received. Connection declined")
-        return False
-    else:
-        #if message type is DECLINE wait for client commands
-        msg_type = MessageType.DECLINE.to_bytes()
-
-        client_socket.sendto(msg_type, client_addr)
-        print(f"{server_name}: FIN received. Connection declined")
+            msg_type = MessageType.ACCEPT.to_bytes()
+            username = encode_username(header.username)
+            client_socket.sendto(b''.join([msg_type, username]), client_addr)
+            
+            clients.append((header.username, server_address))
+            #Start receiving chat messages from another daemon
+            print(f"{server_name}: Connection established")
+            disconnected = False
+            t1 = threading.Thread(target=receive_chat_message, daemon=True)
+            t1.start()
+            #Start chat with client
+            chat_with_client()
+            return True
+        #if received operation type is FIN connection is declined
+        elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
+            msg_type = MessageType.DECLINE.to_bytes()
+            username = encode_username(header.username)
+            client_socket.sendto(b''.join([msg_type, username]), client_addr)
+            print(f"{server_name}: FIN received. Connection declined")
+            client_commands()
+            return False
+        else:
+            #if message type is DECLINE wait for client commands
+            msg_type = MessageType.DECLINE.to_bytes()
+            client_socket.sendto(msg_type, client_addr)
+            print(f"{server_name}: FIN received. Connection declined")
+            client_commands()
+            return True
+    except OSError:
+        print('INVALID IP address')
+        msg_type = MessageType.ERROR.to_bytes()
+        client_socket.sendto(msg_type, client_addr) 
         client_commands()
-
+        return False
 
 #function to check pending requests
 def check_pending():
-    global clients, client_socket, daemon_socket, t1, t2
+    global clients, client_socket, daemon_socket, t1
 
     print(f"{server_name}: Check for pending requests")
     daemon_socket.settimeout(5)
@@ -505,7 +519,7 @@ def check_pending():
 
 #function to handle pending requests
 def handle_pending(header, server_address):
-    global clients, client_socket, daemon_socket, t1, t2
+    global clients, client_socket, daemon_socket, t1,disconnected
     client_name = clients[0][0]
     client_addr = clients[0][1]
     msg_type = MessageType.REQUEST.to_bytes()
@@ -535,11 +549,14 @@ def handle_pending(header, server_address):
         #if the ACK is received start receiving chat messages from another daemon and start chat with client
         if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
             print(f"{server_name}: Final ACK received. Connection established")
+            disconnected = False
             clients.append((orig_endname, server_address))
             t1 = threading.Thread(target=receive_chat_message, daemon=True)
             t1.start()
-            t2 = threading.Thread(target=chat_with_client(True))
-            t2.start()
+
+            chat_with_client()
+
+            return
         #if ACK is not received waits for client commands and send error messages
         else:
             print(f"{server_name}: Unexpected response. Connection setup failed")
@@ -558,8 +575,9 @@ def handle_pending(header, server_address):
 
 
 #function to wait for the connections
-def wait_for_connection():
-    global clients, client_socket, daemon_socket, t1, t2
+def wait_for_connection(accepted = False):
+    global clients, client_socket, daemon_socket, t1,disconnected
+
     client_name = clients[0][0]
     client_addr = clients[0][1]
 
@@ -573,20 +591,24 @@ def wait_for_connection():
         if header.type == DatagramType.CONTROL and header.operation == OperationType.SYN and len(clients) != 2:
             print(f"{server_name}: SYN received from {server_address}. Need client's decision.")
             msg_type = MessageType.REQUEST.to_bytes()
-
             username_end = encode_username(header.username)
             orig_endname = header.username
             msg = b''.join([msg_type, username_end])
-
+            print(msg)
+            print(client_socket)
             client_socket.sendto(msg, client_addr)
+            print(client_addr,client_name)
+            print()
             daemon_socket.settimeout(60)
+
+
             user_respond, _ = client_socket.recvfrom(1024)
             print(f'{server_name}: received decision,{user_respond}')
-
             header = build_client_header(user_respond)
-            print(header.type)
-            # if the message type is ACCEPT, sends SYN + ACK
-            if header.type == MessageType.ACCEPT:
+
+
+                # if the message type is ACCEPT, sends SYN + ACK
+            if header.type == MessageType.ACCEPT or accepted:
                 dtype = DatagramType.CONTROL.to_bytes()
                 operation = (OperationType.SYN.value | OperationType.ACK.value).to_bytes(1, byteorder='big')
                 seq = int(0).to_bytes(1, byteorder='big')
@@ -598,11 +620,14 @@ def wait_for_connection():
                 # if the ACK is received start receiving chat messages from another daemon and start chat with client
                 if ack_header.type == DatagramType.CONTROL and ack_header.operation == OperationType.ACK:
                     print(f"{server_name}: Final ACK received. Connection established")
+                    disconnected = False
                     clients.append((orig_endname, server_address))
                     t1 = threading.Thread(target=receive_chat_message, daemon=True)
                     t1.start()
-                    t2 = threading.Thread(target=chat_with_client(True))
-                    t2.start()
+                    # t2 = threading.Thread(target=chat_with_client(True))
+                    # t2.start()
+                    chat_with_client()
+                    return True
                 # if ACK is not received waits for client commands and send error messages
                 else:
                     print(f"{server_name}: Unexpected response. Connection setup failed")
@@ -620,7 +645,8 @@ def wait_for_connection():
                 client_commands()
         else:
             #if response is not SYN send error message
-            print(f"{server_name}: Unexpected or invalid SYN message. Connection setup aborted.")
+            print(f"{server_name}: Got Unexpected or invalid SYN message. Connection setup aborted.")
+            print(clients, header.type,header.operation)
             msg_type = MessageType.ERROR.to_bytes()
             client_socket.sendto(msg_type, client_addr)
             client_commands()
@@ -679,6 +705,7 @@ def wait_for_client():
                     client_socket.sendto(msg_type, addr)
                     print(f"Established connection with client: {clients[0][0]} address {addr}")
                     client_commands()
+                    return
                 #if there are pending requests ask client if he wants to accept or decline first request
                 else:
                     msg_type = MessageType.WAIT.to_bytes()
@@ -686,41 +713,57 @@ def wait_for_client():
                     print(f"Established connection with client: {clients[0][0]} address {addr}")
                     print(pending_requests)
                     handle_pending(pending_requests[0][0],pending_requests[0][1])
+                    return
         #if there is already client connected, reject connection
         else:
             print(f"THE DAEMON IS ALREADY OCCUPIED BY {clients[0][0]} {addr}, rejecting the conncetion")
             msg_type = MessageType.ERROR.to_bytes()
             payload = "This daemon is already occupied".encode('ascii')
             client_socket.sendto(b''.join([msg_type, payload]), addr)
+            continue
 
 
 #function to handle client command
 def client_commands():
-    global clients, client_socket, server_name
+    global clients, client_socket, server_name,disconnected
 
     client_name = clients[0][0]
     client_addr = clients[0][1]
     while True:
-        print(f"{server_name}: Daemon is waiting for client commands...")
-        msg, addr = client_socket.recvfrom(1024)
-        header = build_client_header(msg)
-        #if the client send DISCONNECTION message, daemon returns to wait for client state
-        if header.type == MessageType.DISCONNECTION:
-            msg_type = MessageType.DISCONNECTION.to_bytes()
-            print(f"{server_name}: Received termination request from {client_name}")
-            client_socket.sendto(msg_type, client_addr)
-            del clients[0]
-            wait_for_client()
-        #if the client sends REQUEST for chat, daemon requests connection with provided ip address
-        if header.type == MessageType.REQUEST:
-            ip = msg[1:].decode()
-            print(f"{server_name}: Starting connection handshake with {ip}")
-            request_connection(ip, 7777)
-        #if the client sends WAIT message, daemon starts waiting for the connections
-        elif header.type == MessageType.WAIT:
-            print(f'{server_name}: Received wait request from client')
-            wait_for_connection()
+        if disconnected:
+            try:
+                print(f"{server_name}: Daemon is waiting for client commands...")
+                msg, addr = client_socket.recvfrom(1024)
+                header = build_client_header(msg)
+                #if the client send DISCONNECTION message, daemon returns to wait for client state
+                if header.type == MessageType.DISCONNECTION:
+                    msg_type = MessageType.DISCONNECTION.to_bytes()
+                    print(f"{server_name}: Received termination request from {client_name}")
+                    client_socket.sendto(msg_type, client_addr)
+                    clients = []
+                    
+                    wait_for_client()
+                    return
 
+
+                #if the client sends REQUEST for chat, daemon requests connection with provided ip address
+                if header.type == MessageType.REQUEST:
+                    ip = msg[1:].decode()
+                    print(f"{server_name}: Starting connection handshake with {ip}")
+                    request_connection(ip, 7777)
+                    return
+                #if the client sends WAIT message, daemon starts waiting for the connections
+                elif header.type == MessageType.WAIT:
+                    print(f'{server_name}: Received wait request from client')
+                    wait_for_connection()
+                    return
+
+            except socket.timeout:
+                continue
+            except:
+                print('error trying to reach the client')
+                clients = []
+                wait_for_client()
 
 #function that simulates stop and wait strategy
 def stop_and_wait_send(message, seq, type=True):
@@ -731,6 +774,7 @@ def stop_and_wait_send(message, seq, type=True):
         return False  # Early return if disconnected
 
     retries = 3
+
     with ack_lock:
         ack_received[seq] = False  # Reset ACK status for the given seq
 
@@ -757,7 +801,8 @@ def stop_and_wait_send(message, seq, type=True):
     print(f"Failed to receive ACK for seq {seq} after {retries} retries.")
     return False  # If all retries fail
 
-def chat_with_client(flag=True):
+
+def chat_with_client():
     global clients, client_socket, server_name, daemon_socket, messages, t1, t2, ack_received, disconnected
     client_name = clients[0][0]
     client_addr = clients[0][1]
@@ -770,7 +815,7 @@ def chat_with_client(flag=True):
             print(f"{server_name}: Connection is disconnected. No further messages will be sent.")
             client_commands()
             break
-
+        print('listening to client messages')
 
         msg, _ = client_socket.recvfrom(1024)
         header = build_client_header(msg)
@@ -783,19 +828,19 @@ def chat_with_client(flag=True):
                 else:
                     print(f"Failed to deliver message with seq {seq} after retries.")
                 seq = 1 - seq
-
+                continue
+        
         elif header.type == MessageType.DISCONNECT_REQUEST:
             send_chat_message(type = False)
 
             seq = 1 - seq
             if t1.is_alive():
                 t1.join()
-            if t2.is_alive():
-                t2.join()
 
+            clients.pop(1)
             disconnected = True  # Set disconnected flag to stop further communication
             print(f"{server_name}: Daemon is disconnected and waiting for new commands.")
-
+            client_commands()
             break  # Exit the loop after disconnecting
 
 
@@ -819,6 +864,7 @@ if __name__ == "__main__":
         print("Usage: python daemon.py <server_ip>")
         sys.exit(1)
 
-    server_thread = threading.Thread(target=start_server, args=(sys.argv[1],))
+    start_server(sys.argv[1],)
+    # server_thread = threading.Thread(target=start_server, args=(sys.argv[1],))
 
-    server_thread.start()
+    # server_thread.start()

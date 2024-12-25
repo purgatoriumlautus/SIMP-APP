@@ -1,4 +1,6 @@
 USERNAME_LENGHT = 32
+import time
+import random
 def get_username():
     username = ""
     while len(username) == 0:    
@@ -15,5 +17,7 @@ def get_username():
         return username.encode('ascii').ljust(USERNAME_LENGHT,b"\x00")
 
 
-c = get_username()
-print(c,len(c))
+integer = random.randint(10,15)
+print(integer)
+print(str(time.time_ns())[random.randint(10,15)])
+# print(c,len(c))
