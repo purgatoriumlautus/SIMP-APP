@@ -193,7 +193,7 @@ def pending(host):
                     t2 = threading.Thread(target=receive_messages)
                     t2.start()
                     
-                    send_messages(host, header.username)
+                    send_messages(host)
                     
                     return
                 # if the decision is no send DECLINE message
@@ -201,13 +201,15 @@ def pending(host):
                     msg_type = MessageType.DECLINE.to_bytes()
                     server_socket.sendto(msg_type, addr)
                     print('Conncection declined, going back to main menu')
-                    menu()
                     return
                 
     except socket.timeout:
         print("No requests came, going back to menu")
-        menu()
         return
+    
+    except ConnectionResetError:
+        print("Lost connection with daemon. Please restart an app")
+        sys.exit(0)
     
 #function that waits for the connection
 def wait_for_connection(host):
@@ -237,7 +239,7 @@ def wait_for_connection(host):
                     t2 = threading.Thread(target=receive_messages)
                     t2.start()
                     
-                    send_messages(host,header.username)
+                    send_messages(host)
                     
                     return
                 # if the decision is no send DECLINE message
@@ -245,15 +247,17 @@ def wait_for_connection(host):
                     msg_type= MessageType.DECLINE.to_bytes()
                     server_socket.sendto(msg_type,addr)
                     print('Conncection declined, going back to main menu')
-                    menu()
                     return
         else: 
             print('got unexpcted message type, going back to menu')
-            menu()
+            return
     except socket.timeout:
         print("No requests came, going back to menu")
-        menu()
-            
+        return
+    except ConnectionResetError:
+        print("Lost connection with daemon. Please restart an app")
+        sys.exit(0)
+        
 
 #function that asks to choose option
 def menu():
@@ -267,13 +271,12 @@ def menu():
 
         if option == "1":
             request_chat(daemon_ip)
-            return
+
         elif option == "2":
             wait_for_connection(daemon_ip)
-            return
+
         elif option.lower() == "q":
             quit_daemon(daemon_ip)
-            return
         else:
             print("Invalid option. Please try again.")
             continue
@@ -301,29 +304,32 @@ def request_chat(host) :
                 t2 = threading.Thread(target=receive_messages)
                 t2.start()
                 
-                send_messages(host,header.username)
+                send_messages(host)
                 
                 return
             #if received message is DECLINE proceed to menu
             elif header.type == MessageType.DECLINE:
                 print(f"Connection was not accepted by {header.username}")
                 print("try again later")
-                menu()
                 return 
+            
             elif header.type == MessageType.ERROR:
-                print('Invalid or impropriate IP address, try another one')
-                menu()
+                print('Got an error message from the server')
+                print(get_payload(reply))
                 return
             else: raise ValueError
             
         except socket.timeout:
             print(f"Timeout expired, no reply from {ip}, try again later")
-            menu()
             return
+        
+        except ConnectionResetError:
+            print("Lost connection with daemon. Please restart an app")
+            sys.exit(0)
 
 
 #function to send messages to the daemon
-def send_messages(host,endhost_name) :
+def send_messages(host) :
     global server_socket, username,in_chat
     
     while in_chat:
@@ -338,8 +344,7 @@ def send_messages(host,endhost_name) :
                 server_socket.sendto(msg_type,(host,7778))
                 print("Disconnect request sent...")
                 in_chat = False
-  
-                menu()
+
                 return
             msg = msg.encode('ascii')
                 
@@ -350,6 +355,9 @@ def send_messages(host,endhost_name) :
         except UnicodeEncodeError:
             print("only latin characters")
             continue
+        except ConnectionResetError:
+            print("Lost connection with daemon. Please restart an app")
+            sys.exit(0)
     else:
         return
     
@@ -374,21 +382,27 @@ def receive_messages():
                     print("companion left the chat, returning to menu")
                     print("type anything to be able to choose an option")
                     in_chat = False
+                    return
                     menu()
                     break
                 #if message type is DISCONNECTION proceed to menu and stop receiving mesages
                 elif header.type == MessageType.DISCONNECTION:
                     print("received confirmation")
                     in_chat = False
-                    menu()
-                    break
+                    return
+                    # break
+                elif header.type == MessageType.ERROR:
+                    print('got an error message from the server')
+                    print(get_payload(msg))
+                    in_chat = False
+                    return
+
             except socket.timeout:
                 continue
 
-            except:
-                print("Error on the server side occured, connection lost. Returning to menu")
-                menu()
-                break
+            except ConnectionResetError:
+                print("Daemon does not respond, forcibly quitting... an application")
+                sys.exit(0)
         else:
             return
 
@@ -416,6 +430,10 @@ def quit_daemon(host) -> None:
                 
         except socket.timeout:
             print("Timeout expired, forcibly clossing the connection with daemon.")
+            sys.exit(0)
+        
+        except ConnectionResetError:
+            print("Daemon does not respond, forcibly quitting...")
             sys.exit(0)
 
 
