@@ -598,8 +598,7 @@ def handle_pending(header, server_address):
             t1.start()
 
             chat_with_client()
-
-            return
+            client_commands()
         #if ACK is not received waits for client commands and send error messages
         else:
             print(f"{server_name}: Unexpected response. Connection setup failed")

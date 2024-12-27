@@ -157,6 +157,7 @@ def connect(host) -> str:
         elif header.type == MessageType.WAIT:
             print("Connected to the daemon")
             pending(host)
+            menu()
         #if message type is ERROR then the daemon is already occupied
         elif header.type == MessageType.ERROR:
             print("Daemon is already occupied, try another one")
