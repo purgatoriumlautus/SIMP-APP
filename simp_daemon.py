@@ -152,9 +152,6 @@ def encode_username(username: str) -> bytes:
     return encoded.ljust(MAX_USERNAME_SIZE, b'\x00')  # fill with null bytes the rest
 
 
-# just for tests
-
-
 # function to retrieve the username from header,
 def get_username(msg):
     try:
@@ -534,8 +531,6 @@ def request_connection(host, port):
             print(f"{server_name}: Rejected connection. User is already connected.")
             return
 
-
-    
     except OSError:
         print('INVALID IP address')
         msg_type = MessageType.ERROR.to_bytes()
@@ -962,6 +957,3 @@ if __name__ == "__main__":
         sys.exit(1)
 
     start_server(sys.argv[1],)
-    # server_thread = threading.Thread(target=start_server, args=(sys.argv[1],))
-
-    # server_thread.start()

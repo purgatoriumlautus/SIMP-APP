@@ -2,9 +2,7 @@ import socket
 import sys
 import threading
 import time
-from multiprocessing import Process
 from enum import Enum
-import atexit
 
 
 USERNAME_LENGHT = 32
@@ -390,7 +388,7 @@ def receive_messages():
                     print("received confirmation")
                     in_chat = False
                     return
-                    # break
+                #if message type is ERROR disconnect person from chat
                 elif header.type == MessageType.ERROR:
                     print('got an error message from the server')
                     print(get_payload(msg))
