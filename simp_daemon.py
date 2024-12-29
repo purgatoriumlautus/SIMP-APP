@@ -376,7 +376,14 @@ def receive_chat_message():
             client_socket.sendto(b''.join([msg_type, msg]), clients[0][1])
             return False
         try:
-            if header.type == DatagramType.CHAT and header.operation == OperationType.MESSAGE:
+            if header.type == DatagramType.CONTROL and header.operation == OperationType.SYN:
+                username = encode_username(header.username)
+                msg_type = MessageType.ERROR.to_bytes()
+                response_msg = b''.join([msg_type, username])
+                daemon_socket.sendto(response_msg, sender_addr)
+                print(f"{server_name}: Rejected connection for {username}. Already connected.")
+
+            elif header.type == DatagramType.CHAT and header.operation == OperationType.MESSAGE:
                 if not disconnected:  # Prevent sending chat messages if disconnected
                     message = get_msg_payload(msg)
                     print(f"{server_name}: Received message from {sender_addr}: {message.decode('ascii')}")
@@ -514,18 +521,20 @@ def request_connection(host, port):
        
         #if received operation type is FIN connection is declined
         elif header.type == DatagramType.CONTROL and header.operation == OperationType.FIN:
-            msg_type = MessageType.DECLINE.to_bytes()
             username = encode_username(header.username)
+            msg_type = MessageType.DECLINE.to_bytes()
             client_socket.sendto(b''.join([msg_type, username]), client_addr)
             print(f"{server_name}: FIN received. Connection declined")
             return
-        
+        #if other we count that user is already in
         else:
-            #if message type is unkown wait for client commands
-            msg_type = MessageType.DECLINE.to_bytes()
-            client_socket.sendto(msg_type, client_addr)
-            print(f"{server_name}: FIN received. Connection declined")
+            msg_type = MessageType.ERROR.to_bytes()
+            username = encode_username(header.username)
+            client_socket.sendto(b''.join([msg_type, username]), client_addr)
+            print(f"{server_name}: Rejected connection. User is already connected.")
             return
+
+
     
     except OSError:
         print('INVALID IP address')

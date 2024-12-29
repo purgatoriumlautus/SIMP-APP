@@ -315,8 +315,7 @@ def request_chat(host) :
                 return 
             
             elif header.type == MessageType.ERROR:
-                print('Got an error message from the server')
-                print(get_payload(reply))
+                print(f"User is busy in other chat")
                 return
             else: raise ValueError
             
