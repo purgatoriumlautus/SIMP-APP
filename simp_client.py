@@ -7,10 +7,11 @@ from enum import Enum
 
 USERNAME_LENGHT = 32
 MAX_HEADER_SIZE = 33
-
 client_name = None
 client_addr = None
 in_chat = False
+
+
 #class to identify message types
 class MessageType(Enum):
     CHAT = 0
@@ -21,7 +22,8 @@ class MessageType(Enum):
     DISCONNECT_REQUEST = 5
     ACCEPT = 6
     DECLINE = 7
-    ERROR = 8 
+    ERROR = 8
+
     def to_bytes(self):
         if self == MessageType.CHAT:
             return int(0).to_bytes(1, byteorder='big')
@@ -45,11 +47,12 @@ class MessageType(Enum):
 
 #header class
 class Header:
-    type:MessageType
-    username:str
+    type: MessageType
+    username: str
     def __init__(self):
         self.type = None
         self.username = None
+
 
 #function to identify message type
 def get_message_type(msg):
@@ -72,6 +75,7 @@ def get_message_type(msg):
     elif indicator == 7:
         return MessageType.DECLINE
     return MessageType.ERROR
+
     
 #function to extract the username
 def extract_username(message):
@@ -80,6 +84,7 @@ def extract_username(message):
         return username.decode('ascii').rstrip('\x00')
     except:
         return False
+
 
 #function to get payload from header
 def get_payload(msg):
@@ -108,7 +113,6 @@ def build_header(msg):
         header.username = extract_username(msg)
     return header
 
-       
 
 #function to get username from input field
 def get_username():
@@ -127,7 +131,7 @@ def get_username():
                 break
             return username.encode('ascii').ljust(USERNAME_LENGHT,b"\x00")
         except Exception as e:
-            print('Username username has to be between 1:32 latin characters long',e)
+            print('Username username has to be between 1:32 latin characters long', e)
             username = ""
             continue
 
@@ -209,10 +213,11 @@ def pending(host):
     except ConnectionResetError:
         print("Lost connection with daemon. Please restart an app")
         sys.exit(0)
-    
+
+
 #function that waits for the connection
 def wait_for_connection(host):
-    global server_socket,t2,in_chat
+    global server_socket, t2, in_chat
     try:
         print("For next 60 seconds will be opened for connections")
         server_socket.settimeout(60)
@@ -281,9 +286,8 @@ def menu():
             continue
 
 
-
 #function to request the chat
-def request_chat(host) :
+def request_chat(host):
     global server_socket,t2,in_chat
     while True:
         ip = input("Provide IP for chat request: ").encode()
@@ -327,7 +331,7 @@ def request_chat(host) :
 
 
 #function to send messages to the daemon
-def send_messages(host) :
+def send_messages(host):
     global server_socket, username,in_chat
     
     while in_chat:
@@ -403,6 +407,7 @@ def receive_messages():
                 sys.exit(0)
         else:
             return
+
 
 #function to quite the daemon
 def quit_daemon(host) -> None:

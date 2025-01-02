@@ -22,9 +22,8 @@ ack_received = {}
 ack_lock = threading.Lock()
 disconnected = True
 
+
 # datagram type class used to identify the type of the message (\x00 -> control, \x01 -> chat)
-
-
 class DatagramType(Enum):
     CONTROL = 0
     CHAT = 1
@@ -93,7 +92,7 @@ class HeaderInfo:
         self.errors = []
 
 
-# fucntion to retrieve a datagram type from header
+#function to retrieve a datagram type from header
 def get_datagram_type(msg):
     indicator = msg[0]
     if indicator == 1:
@@ -213,7 +212,7 @@ def build_header(msg):
     else:
         header.seq = seq
 
-    # get the username of the message transmittor
+    # get the username of the message
     username = get_username(msg)
     # if any problems with the username -> append an error to the header object
     if username == ErrorType.USERNAME_ERROR:
@@ -338,6 +337,7 @@ def build_fin_message(seq):
     datagram = b''.join([dtype, operation, seq_byte, username])
     return datagram
 
+
 def build_ack_message(seq):
     dtype = DatagramType.CONTROL.to_bytes()
     operation = OperationType.ACK.to_bytes()
@@ -345,6 +345,7 @@ def build_ack_message(seq):
     username = encode_username(clients[0][0])
     datagram = b''.join([dtype, operation, seq_byte, username])
     return datagram
+
 
 #function that handles reciving of chat messages from another daemon
 def receive_chat_message():
@@ -432,9 +433,6 @@ def receive_chat_message():
             
             return
         
-        
-
-
 
 #function that handles sending of chat messages
 def send_chat_message(message='', type=True, seq=0):
@@ -547,6 +545,7 @@ def request_connection(host, port):
         print("Error",e,"while requesting a connection has occured")
         return False
 
+
 #function to check pending requests
 def check_pending():
     global clients, client_socket, daemon_socket, t1
@@ -640,16 +639,13 @@ def wait_for_connection(accepted = False):
             username_end = encode_username(header.username)
             orig_endname = header.username
             msg = b''.join([msg_type, username_end])
-            
 
             client_socket.sendto(msg, client_addr)
             daemon_socket.settimeout(60)
 
-
             user_respond, _ = client_socket.recvfrom(1024)
             print(f'{server_name}: received decision,{user_respond}')
             header = build_client_header(user_respond)
-
 
                 # if the message type is ACCEPT, sends SYN + ACK
             if header.type == MessageType.ACCEPT or accepted:
@@ -668,8 +664,6 @@ def wait_for_connection(accepted = False):
                     clients.append((orig_endname, server_address))
                     t1 = threading.Thread(target=receive_chat_message, daemon=True)
                     t1.start()
-                    # t2 = threading.Thread(target=chat_with_client(True))
-                    # t2.start()
                     chat_with_client()
                     return True
                 # if ACK is not received waits for client commands and send error messages
@@ -786,6 +780,7 @@ def wait_for_client():
             print("Error",e,"while waiting for client has occured")
             continue          
 
+
 #function to handle client command
 def client_commands():
     global clients, client_socket, server_name,disconnected
@@ -819,8 +814,6 @@ def client_commands():
                 elif header.type == MessageType.WAIT:
                     print(f'{server_name}: Received wait request from client')
                     wait_for_connection()
-                    
-
             except socket.timeout:
                 continue
             except ConnectionResetError:
@@ -831,7 +824,8 @@ def client_commands():
                 print("ERROR",e," while listening to client commands has occured")
         else:
             return
-        
+
+
 #function that simulates stop and wait strategy
 def stop_and_wait_send(message, seq, type=True):
     global ack_received, disconnected
@@ -882,6 +876,7 @@ def stop_and_wait_send(message, seq, type=True):
         print("Error",e,"during stop and wait has occured")
         return False
 
+
 def chat_with_client():
     global clients, client_socket, server_name, daemon_socket, messages, t1, t2, ack_received, disconnected
 
@@ -921,8 +916,8 @@ def chat_with_client():
                 disconnected = True  # Set disconnected flag to stop further communication
                 print(f"{server_name}: Daemon is disconnected and waiting for new commands.")
                 return
-                # client_commands()
-                # break  # Exit the loop after disconnecting
+
+                # Exit the loop after disconnecting
         except ConnectionResetError:
             print("Lost connection with client while sending a message to him. going back to wait for clients state")
 
